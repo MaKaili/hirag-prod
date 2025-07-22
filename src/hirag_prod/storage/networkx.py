@@ -242,7 +242,10 @@ class NetworkXGDB(BaseGDB):
             Tuple[List[Entity], List[Relation]]: Nodes and edges
         """
         # TODO(kaili, urgent): Need to change the schema of the graph
-        nodes = [self.graph.nodes[node] for node in self.graph.nodes]
+        nodes = [
+            {**self.graph.nodes[node], "document_key": node}
+            for node in self.graph.nodes
+        ]
         edges = [
             {**self.graph.edges[edge], "source": edge[0], "target": edge[1]}
             for edge in self.graph.edges
