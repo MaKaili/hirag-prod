@@ -241,8 +241,12 @@ class NetworkXGDB(BaseGDB):
         Returns:
             Tuple[List[Entity], List[Relation]]: Nodes and edges
         """
+        # TODO(kaili, urgent): Need to change the schema of the graph
         nodes = [self.graph.nodes[node] for node in self.graph.nodes]
-        edges = [self.graph.edges[edge] for edge in self.graph.edges]
+        edges = [
+            {**self.graph.edges[edge], "source": edge[0], "target": edge[1]}
+            for edge in self.graph.edges
+        ]
         return nodes, edges
 
     async def dump(self):
