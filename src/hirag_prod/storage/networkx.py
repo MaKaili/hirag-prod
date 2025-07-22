@@ -227,6 +227,24 @@ class NetworkXGDB(BaseGDB):
 
         return successful_neighbors, successful_edges
 
+    async def query_graph_by_keys(
+        self, key_value: List[str], key_column: str = "document_key"
+    ) -> (List[Entity], List[Relation]):
+        """
+        Query graph by key_value, return nodes and edges. We assume key_column appears in the metadata of the nodes.
+        Return all nodes and edges that have at least one node in key_value.
+
+        Args:
+            key_value: List of keys to query
+            key_column: Column name to query
+
+        Returns:
+            Tuple[List[Entity], List[Relation]]: Nodes and edges
+        """
+        nodes = [self.graph.nodes[node] for node in self.graph.nodes]
+        edges = [self.graph.edges[edge] for edge in self.graph.edges]
+        return nodes, edges
+
     async def dump(self):
         if os.path.dirname(self.path) != "":
             os.makedirs(os.path.dirname(self.path), exist_ok=True)

@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pyarrow as pa
 from dotenv import load_dotenv
 
+# from hirag_prod.similarity import CosineSimilarity
+
 from hirag_prod._llm import (
     ChatCompletion,
     EmbeddingService,
@@ -25,7 +27,10 @@ from hirag_prod.loader.chunk_split import (
     chunk_docling_document,
     chunk_langchain_document,
 )
-from hirag_prod.parser import DictParser
+from hirag_prod.parser import (
+    DictParser,
+    ReferenceParser,
+)
 from hirag_prod.prompt import PROMPTS
 from hirag_prod.resume_tracker import ResumeTracker
 from hirag_prod.schema import Entity
@@ -37,13 +42,6 @@ from hirag_prod.storage import (
     NetworkXGDB,
     RetrievalStrategyProvider,
 )
-from hirag_prod.prompt import PROMPTS
-from hirag_prod.parser import (
-    DictParser,
-    ReferenceParser,
-)
-# from hirag_prod.similarity import CosineSimilarity
-from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
 load_dotenv("/chatbot/.env", override=True)
 
@@ -52,8 +50,8 @@ load_dotenv("/chatbot/.env", override=True)
 # ============================================================================
 
 # Database Configuration
-DEFAULT_DB_URL = "kb/hirag.db"
-DEFAULT_GRAPH_DB_PATH = "kb/hirag.gpickle"
+DEFAULT_DB_URL = "/kb_clean/demo.db"
+DEFAULT_GRAPH_DB_PATH = "/kb_clean/demo.gpickle"
 
 # Redis Configuration for resume tracker
 DEFAULT_REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/2")
@@ -906,9 +904,39 @@ class QueryService:
             "relations": relations,
         }
 
-    async def query_chunk_embeddings(
-        self, chunk_ids: List[str]
+    async def query_graph_by_keys(
+        self, key_value: List[str], key_column: str = "document_key"
     ) -> Dict[str, Any]:
+        """Query graph by keys,"""
+        nodes, edges = await self.storage.gdb.query_graph_by_keys(
+            key_value, key_column=key_column
+        )
+        return nodes, edges
+
+    async def query_chunks_by_keys(
+        self, key_value: List[str], key_column: str = "document_key"
+    ) -> Dict[str, Any]:
+        """Query chunks by keys"""
+        chunks = await self.storage.vdb.query_by_keys(
+            key_value, key_column=key_column, table=self.storage.chunks_table
+        )
+        return chunks
+
+    async def query_all_by_keys(
+        self, key_value: List[str], key_column: str = "document_key"
+    ) -> Dict[str, Any]:
+        """Query all by keys"""
+        chunks = await self.query_chunks_by_keys(key_value, key_column=key_column)
+        entities, relations = await self.query_graph_by_keys(
+            key_value, key_column=key_column
+        )
+        return {
+            "chunks": chunks,
+            "entities": entities,
+            "relations": relations,
+        }
+
+    async def query_chunk_embeddings(self, chunk_ids: List[str]) -> Dict[str, Any]:
         """Query chunk embeddings"""
         if not chunk_ids:
             return {}
@@ -929,20 +957,16 @@ class QueryService:
                     res[chunk["document_key"]] = chunk["vector"]
                 else:
                     # Log missing vector data and raise exception
-                    logger.warning(
-                        f"Chunk {chunk['document_key']} has no vector data"
-                    )
+                    logger.warning(f"Chunk {chunk['document_key']} has no vector data")
                     res[chunk["document_key"]] = None
 
         except Exception as e:
             logger.error(f"Failed to query chunk embeddings: {e}")
             return {}
-        
+
         return res
 
-    async def query_entity_embeddings(
-        self, entity_ids: List[str]
-    ) -> Dict[str, Any]:
+    async def query_entity_embeddings(self, entity_ids: List[str]) -> Dict[str, Any]:
         """Query entity embeddings"""
         if not entity_ids:
             return {}
@@ -973,6 +997,7 @@ class QueryService:
             return {}
 
         return res
+
 
 # ============================================================================
 # Main HiRAG class
@@ -1009,7 +1034,7 @@ class HiRAG:
         instance = cls(config=config)
         await instance._initialize(**kwargs)
         return instance
-    
+
     async def set_language(self, language: str) -> None:
         """Set the language for the HiRAG instance"""
         if language not in SUPPORTED_LANGUAGES:
@@ -1083,9 +1108,13 @@ class HiRAG:
     # ========================================================================
 
     # Helper function for similarity calcuation
-    async def calculate_similarity(self, sentence_embedding: List[float], references: Dict[str, List[float]]) -> List[Dict[str, float]]:
+    async def calculate_similarity(
+        self, sentence_embedding: List[float], references: Dict[str, List[float]]
+    ) -> List[Dict[str, float]]:
         """Calculate similarity between sentence embedding and reference embeddings"""
-        from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
+        from sklearn.metrics.pairwise import (
+            cosine_similarity as sklearn_cosine_similarity,
+        )
 
         similar_refs = []
         for entity_key, embedding in references.items():
@@ -1093,10 +1122,9 @@ class HiRAG:
                 similarity = sklearn_cosine_similarity(
                     [sentence_embedding], [embedding]
                 )[0][0]
-                similar_refs.append({
-                    "document_key": entity_key,
-                    "similarity": similarity
-                })
+                similar_refs.append(
+                    {"document_key": entity_key, "similarity": similarity}
+                )
         return similar_refs
 
     async def chat_complete(self, prompt: str, **kwargs: Any) -> str:
@@ -1135,13 +1163,17 @@ class HiRAG:
             placeholder = PROMPTS["REFERENCE_PLACEHOLDER"]
 
             parser = DictParser()
-                
+
             # Should use parser to better format the data
             data = "Chunks:\n" + parser.parse_list_of_dicts(chunks, "table") + "\n\n"
-            data += "Entities:\n" + parser.parse_list_of_dicts(entities, "table") + "\n\n"
+            data += (
+                "Entities:\n" + parser.parse_list_of_dicts(entities, "table") + "\n\n"
+            )
             # data += "Relations:\n" + str(relationships) + "\n\n"
 
-            prompt = prompt.format(data=data, max_report_length="5000", reference_placeholder=placeholder)
+            prompt = prompt.format(
+                data=data, max_report_length="5000", reference_placeholder=placeholder
+            )
 
             try:
                 summary = await self.chat_complete(
@@ -1176,9 +1208,15 @@ class HiRAG:
                 logger.warning("No reference sentences found in summary")
                 return summary
 
-            sentence_embeddings = await self.embedding_service.create_embeddings(texts=ref_sentences)
-            chunk_embeddings = await self._query_service.query_chunk_embeddings(chunk_keys)
-            entity_embeddings = await self._query_service.query_entity_embeddings(entity_keys)
+            sentence_embeddings = await self.embedding_service.create_embeddings(
+                texts=ref_sentences
+            )
+            chunk_embeddings = await self._query_service.query_chunk_embeddings(
+                chunk_keys
+            )
+            entity_embeddings = await self._query_service.query_entity_embeddings(
+                entity_keys
+            )
 
             # relation_descriptions = [rel.properties["description"] for rel in relationships]
             # relation_embeddings = await self.embedding_service.create_embeddings(texts=relation_descriptions)
@@ -1196,15 +1234,29 @@ class HiRAG:
                     result.append("")
                     continue
 
-                similar_chunks = await self.calculate_similarity(sentence_embedding, chunk_embeddings)
+                similar_chunks = await self.calculate_similarity(
+                    sentence_embedding, chunk_embeddings
+                )
 
                 if DEBUG:
-                    print("\n\n\nSimilar Chunks for Sentence:", sentence, "\n", similar_chunks)
+                    print(
+                        "\n\n\nSimilar Chunks for Sentence:",
+                        sentence,
+                        "\n",
+                        similar_chunks,
+                    )
 
-                similar_entities = await self.calculate_similarity(sentence_embedding, entity_embeddings)
+                similar_entities = await self.calculate_similarity(
+                    sentence_embedding, entity_embeddings
+                )
 
                 if DEBUG:
-                    print("\n\n\nSimilar Entities for Sentence:", sentence, "\n", similar_entities)
+                    print(
+                        "\n\n\nSimilar Entities for Sentence:",
+                        sentence,
+                        "\n",
+                        similar_entities,
+                    )
 
                 # similar_relations = await self.calculate_similarity(sentence_embedding, relation_embeddings)
 
@@ -1228,12 +1280,15 @@ class HiRAG:
                 most_similar = reference_list[0]
                 if most_similar["similarity"] > reference_threshold:
                     reference_threshold = max(
-                        most_similar["similarity"] - max_similarity_difference, reference_threshold
+                        most_similar["similarity"] - max_similarity_difference,
+                        reference_threshold,
                     )
-                
+
                 # Filter references based on similarity threshold
                 filtered_references = [
-                    ref for ref in reference_list if ref["similarity"] >= reference_threshold
+                    ref
+                    for ref in reference_list
+                    if ref["similarity"] >= reference_threshold
                 ]
 
                 # Limit the number of references to DEFAULT_MAX_REFERENCES
@@ -1243,7 +1298,7 @@ class HiRAG:
                 if not filtered_references:
                     result.append("")
                     continue
-                
+
                 # Separate the references by "," and sort by type as primary, similarity as secondary
                 filtered_references.sort(
                     key=lambda x: (x["document_key"].split("_")[0], -x["similarity"])
@@ -1251,7 +1306,12 @@ class HiRAG:
 
                 # Append the document keys to the result
                 if DEBUG:
-                    print("\n\n\nFiltered References for Sentence:", sentence, "\n", filtered_references)
+                    print(
+                        "\n\n\nFiltered References for Sentence:",
+                        sentence,
+                        "\n",
+                        filtered_references,
+                    )
 
                 if len(filtered_references) == 1:
                     result.append(filtered_references[0]["document_key"])
@@ -1381,6 +1441,18 @@ class HiRAG:
             query_all_results["summary"] = text_summary
             return query_all_results
         return await self._query_service.query_all(query)
+
+    async def query_all_by_keys(
+        self, key_value: List[str], key_column: str = "document_key"
+    ) -> Dict[str, Any]:
+        """Query all by keys, return chunks, entities, and relations.
+        This function is used for showing the details of the knowledge within the given scope: data of the column key_column in key_value.
+        """
+        if not self._query_service:
+            raise HiRAGException("HiRAG instance not properly initialized")
+        return await self._query_service.query_all_by_keys(
+            key_value, key_column=key_column
+        )
 
     async def get_health_status(self) -> Dict[str, Any]:
         """Get system health status"""
