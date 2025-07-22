@@ -292,6 +292,7 @@ class LanceDB(BaseVDB):
                 "uri",
                 "filename",
                 "private",
+                "document_key",
             ]
             if key_column not in columns_to_select:
                 columns_to_select.append(key_column)
